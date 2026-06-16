@@ -35,12 +35,14 @@ document.addEventListener('DOMContentLoaded', function() {
     const streakStatusElement = document.getElementById('streak-status');
     const streakUserElement = document.getElementById('streak-user');
     const streakPartnersElement = document.getElementById('streak-partners');
+    const streakPanel = document.querySelector('.streak-panel');
     let currentlyEditingId = null;
     let allMilestones = [];
     let currentUser = null;
     let unsubscribeMilestones = null;
     let unsubscribeStreak = null;
     let streakData = null;
+    let lastRenderedBrokenSince = null;
 
     anniElement.textContent = `${yourDate.getDate().toString().padStart(2, '0')}-${(yourDate.getMonth() + 1).toString().padStart(2, '0')}-${yourDate.getFullYear()}`;
 
@@ -81,6 +83,10 @@ document.addEventListener('DOMContentLoaded', function() {
         return Math.round((end - start) / 86400000);
     }
 
+    function getStreakLengthThrough(dateString) {
+        return Math.max(0, daysBetween(STREAK_START_DATE, dateString));
+    }
+
     function formatDisplayDate(dateString) {
         const [year, month, day] = dateString.split('-');
         return `${day}-${month}-${year}`;
@@ -94,7 +100,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const yesterday = addDays(today, -1);
         return {
             startDate: STREAK_START_DATE,
-            currentStreak: Math.max(0, daysBetween(STREAK_START_DATE, yesterday) + 1),
+            currentStreak: getStreakLengthThrough(yesterday),
             lastCompletedDate: yesterday,
             brokenSince: null,
             participants: {},
@@ -116,12 +122,28 @@ document.addEventListener('DOMContentLoaded', function() {
         const normalized = data || buildInitialStreakData(today);
         const yesterday = addDays(today, -1);
 
+        if (normalized.lastCompletedDate) {
+            normalized.currentStreak = getStreakLengthThrough(normalized.lastCompletedDate);
+        }
+
         if (!normalized.brokenSince && normalized.lastCompletedDate && normalized.lastCompletedDate < yesterday) {
             normalized.brokenSince = addDays(normalized.lastCompletedDate, 1);
             normalized.repairMission = 'Cả hai cùng viết 3 điều biết ơn nhau hôm nay rồi bấm hoàn thành nhiệm vụ.';
         }
 
         return normalized;
+    }
+
+    function triggerStreakEffect(type) {
+        if (!streakPanel) return;
+
+        streakPanel.classList.remove('streak-effect-success', 'streak-effect-fail', 'streak-effect-restore');
+        void streakPanel.offsetWidth;
+        streakPanel.classList.add(`streak-effect-${type}`);
+
+        window.setTimeout(() => {
+            streakPanel.classList.remove(`streak-effect-${type}`);
+        }, 1200);
     }
 
     function renderStreak() {
@@ -132,6 +154,8 @@ document.addEventListener('DOMContentLoaded', function() {
         const repairSignals = getRepairSignals(data, today);
         const hasCheckedToday = Boolean(userKey && data.checkins?.[today]?.[userKey]);
         const hasRepairedToday = Boolean(userKey && data.repairs?.[today]?.[userKey]);
+        const previousBrokenSince = lastRenderedBrokenSince;
+        const currentBrokenSince = data.brokenSince || null;
 
         document.body.classList.toggle('streak-broken', Boolean(data.brokenSince));
         streakCountElement.textContent = data.currentStreak || 0;
@@ -139,6 +163,13 @@ document.addEventListener('DOMContentLoaded', function() {
         streakPartnersElement.textContent = data.brokenSince
             ? `${repairSignals}/${REQUIRED_DAILY_SIGNALS} nhiệm vụ khôi phục`
             : `${todaySignals}/${REQUIRED_DAILY_SIGNALS} tín hiệu hôm nay`;
+
+        if (currentBrokenSince && currentBrokenSince !== previousBrokenSince) {
+            triggerStreakEffect('fail');
+        } else if (!currentBrokenSince && previousBrokenSince) {
+            triggerStreakEffect('restore');
+        }
+        lastRenderedBrokenSince = currentBrokenSince;
 
         if (!isManager()) {
             streakStatusElement.textContent = 'Đăng nhập tài khoản của hai bạn để gửi tín hiệu mỗi ngày.';
@@ -334,11 +365,16 @@ document.addEventListener('DOMContentLoaded', function() {
             }
 
             transaction.set(streakRef, nextData);
+            return Object.keys(todayCheckins).length >= REQUIRED_DAILY_SIGNALS ? 'success' : 'signal';
+        }).then(() => {
+            triggerStreakEffect('success');
         }).catch(error => {
             if (error.message === 'streak-broken') {
+                triggerStreakEffect('fail');
                 alert('Chuỗi đang bị đứt. Hai bạn cần hoàn thành nhiệm vụ khôi phục trước.');
                 return;
             }
+            triggerStreakEffect('fail');
             handleFirebaseError(error);
         });
     });
@@ -358,7 +394,7 @@ document.addEventListener('DOMContentLoaded', function() {
             const data = normalizeStreakForToday(baseData, today);
 
             if (!data.brokenSince) {
-                return;
+                return 'success';
             }
 
             const participants = {
@@ -390,12 +426,18 @@ document.addEventListener('DOMContentLoaded', function() {
                 nextData.brokenSince = null;
                 nextData.repairMission = null;
                 nextData.lastCompletedDate = today;
-                nextData.currentStreak = Math.max(data.currentStreak || 0, daysBetween(STREAK_START_DATE, today) + 1);
+                nextData.currentStreak = Math.max(data.currentStreak || 0, getStreakLengthThrough(today));
                 nextData.lastRestoredAt = firebase.firestore.FieldValue.serverTimestamp();
             }
 
             transaction.set(streakRef, nextData);
-        }).catch(handleFirebaseError);
+            return Object.keys(todayRepairs).length >= REQUIRED_DAILY_SIGNALS ? 'restore' : 'signal';
+        }).then(result => {
+            triggerStreakEffect(result === 'restore' ? 'restore' : 'success');
+        }).catch(error => {
+            triggerStreakEffect('fail');
+            handleFirebaseError(error);
+        });
     });
 
     managerAuthButton.addEventListener('click', function() {
